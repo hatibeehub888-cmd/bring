@@ -1,0 +1,193 @@
+-- [[ 簡易GUI付き Bring Mob (聚怪) スクリプト ]]
+
+local _RunService = game:GetService("RunService")
+local _Workspace = game:GetService("Workspace")
+local LocalPlayer = game:GetService("Players").LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+
+-- 状態管理用変数
+local bringMobsConnection = nil
+local bringMobsCache = setmetatable({}, {__mode = "k"})
+local lastExecution = 0
+local UPDATE_INTERVAL = 0.05 -- 20Hz節流
+
+-- 敵のパーツキャッシュ取得関数
+local function GetBringMobsParts(enemy)
+	local c = bringMobsCache[enemy]
+	if c and c.hum and c.hum.Parent and c.root and c.root.Parent then
+		return c.hum, c.root
+	end
+	local hum = enemy:FindFirstChildOfClass("Humanoid")
+	local root = enemy:FindFirstChild("HumanoidRootPart")
+	if not hum or not root then
+		bringMobsCache[enemy] = nil
+		return nil, nil
+	end
+	bringMobsCache[enemy] = { hum = hum, root = root }
+	return hum, root
+end
+
+-- 機能の開始 (Start)
+local function StartBringMobs()
+	if bringMobsConnection then return end
+
+	bringMobsConnection = _RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+		if now - lastExecution < UPDATE_INTERVAL then return end
+		lastExecution = now
+
+		pcall(function()
+			local char = LocalPlayer.Character
+			if not char then return end
+
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			local hum = char:FindFirstChild("Humanoid")
+			if not hrp or not hum or hum.Health <= 0 then return end
+
+			-- ネットワーク所有権の範囲を最大化
+			if sethiddenproperty then
+				sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+			end
+
+			local targetPos = hrp.Position
+			local targetCF = CFrame.new(targetPos.X, targetPos.Y - 18, targetPos.Z)
+			local enemies = _Workspace:FindFirstChild("Enemies")
+			if not enemies then return end
+
+			local enemyList = enemies:GetChildren()
+			for i = 1, #enemyList do
+				local enemy = enemyList[i]
+				if enemy:IsA("Model") then
+					local enemyHum, enemyRoot = GetBringMobsParts(enemy)
+					if enemyHum and enemyRoot and enemyHum.Health > 0 then
+						-- 平方距離で負荷軽減
+						local offset = enemyRoot.Position - targetPos
+						local distSq = offset.X*offset.X + offset.Y*offset.Y + offset.Z*offset.Z
+
+						if distSq <= 9000000 then -- 3000^2 (半径3000スタッド以内)
+							if not enemyRoot:FindFirstChild("BodyVelocity") then
+								local bv = Instance.new("BodyVelocity")
+								bv.Name = "BodyVelocity"
+								bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+								bv.Velocity = Vector3.zero
+								bv.Parent = enemyRoot
+							end
+
+							if distSq > 324 then -- 18^2 (18スタッドより離れている場合)
+								local isOwner = true
+								if isnetworkowner then
+									isOwner = isnetworkowner(enemyRoot)
+								end
+								if isOwner then
+									enemyRoot.CFrame = targetCF
+								end
+							end
+
+							-- 敵の挙動を無効化
+							if enemyRoot.CanCollide then enemyRoot.CanCollide = false end
+							if enemyHum.WalkSpeed ~= 0 then enemyHum.WalkSpeed = 0 end
+							if enemyHum.JumpPower ~= 0 then enemyHum.JumpPower = 0 end
+						end
+					end
+				end
+			end
+		end)
+	end)
+end
+
+-- 機能の停止 (Stop)
+local function StopBringMobs()
+	if bringMobsConnection then
+		bringMobsConnection:Disconnect()
+		bringMobsConnection = nil
+	end
+	bringMobsCache = {}
+
+	-- 敵に付与したBodyVelocityの削除
+	pcall(function()
+		local enemies = _Workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, enemy in ipairs(enemies:GetChildren()) do
+				if enemy:IsA("Model") then
+					local enemyRoot = enemy:FindFirstChild("HumanoidRootPart")
+					if enemyRoot then
+						local bv = enemyRoot:FindFirstChild("BodyVelocity")
+						if bv then bv:Destroy() end
+					end
+				end
+			end
+		end
+	end)
+end
+
+
+-- ==========================================
+-- GUIの作成 (ScreenGui & Toggle Button)
+-- ==========================================
+
+-- 既存の同名GUIがあれば削除して重複を防止
+if CoreGui:FindFirstChild("BringMobGUI") then
+	CoreGui.BringMobGUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "BringMobGUI"
+ScreenGui.Parent = CoreGui
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+-- メインフレーム (ドラッグ移動可能)
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 180, 0, 80)
+MainFrame.Position = UDim2.new(0, 20, 0, 20)
+MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true -- マウスでドラッグして移動可能
+MainFrame.Parent = ScreenGui
+
+-- 角丸効果
+local FrameCorner = Instance.new("UICorner")
+FrameCorner.CornerRadius = UDim.new(0, 8)
+FrameCorner.Parent = MainFrame
+
+-- タイトルラベル
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, 0, 0, 30)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Bring Mob (聚怪)"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextSize = 14
+TitleLabel.Font = Enum.Font.SourceSansBold
+TitleLabel.Parent = MainFrame
+
+-- ON/OFF トグルボタン
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "ToggleButton"
+ToggleButton.Size = UDim2.new(0, 140, 0, 35)
+ToggleButton.Position = UDim2.new(0, 20, 0, 35)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50) -- 初期状態：赤色 (OFF)
+ToggleButton.Text = "STATUS: OFF"
+ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleButton.TextSize = 14
+ToggleButton.Font = Enum.Font.SourceSansBold
+ToggleButton.Parent = MainFrame
+
+local ButtonCorner = Instance.new("UICorner")
+ButtonCorner.CornerRadius = UDim.new(0, 6)
+ButtonCorner.Parent = ToggleButton
+
+-- ボタンのクリックイベント（ON/OFF切り替え）
+local isEnabled = false
+ToggleButton.MouseButton1Click:Connect(function()
+	isEnabled = not isEnabled
+	if isEnabled then
+		ToggleButton.BackgroundColor3 = Color3.fromRGB(50, 180, 50) -- 緑色 (ON)
+		ToggleButton.Text = "STATUS: ON"
+		StartBringMobs()
+	else
+		ToggleButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50) -- 赤色 (OFF)
+		ToggleButton.Text = "STATUS: OFF"
+		StopBringMobs()
+	end
+end)
